@@ -1,17 +1,7 @@
 import json, os, re, sys, time, urllib.request, urllib.error
 
-api_key = os.environ["GOOGLE_API_KEY"]
-guidelines = os.environ.get("REVIEW_GUIDELINES", "")
-model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
-min_severity = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
-custom_prompt = os.environ.get("CUSTOM_PROMPT", "").strip()
-extra_instructions = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
-incremental = os.environ.get("INCREMENTAL", "false") == "true"
-last_reviewed_sha = os.environ.get("LAST_REVIEWED_SHA", "")
-
 SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "NIT": 2}
 SEVERITY_ICON = {"HIGH": "\U0001f534", "MEDIUM": "\U0001f7e1", "NIT": "\U0001f535"}
-min_rank = SEVERITY_RANK.get(min_severity, 1)
 
 FRAGMENT_FILES = [
     "/tmp/trivy-fragment.md",
@@ -21,7 +11,6 @@ FRAGMENT_FILES = [
 
 
 def read_fragments():
-    """Read markdown fragments written by prior action steps."""
     sections = []
     for path in FRAGMENT_FILES:
         try:
@@ -35,7 +24,6 @@ def read_fragments():
 
 
 def parse_diff_ranges(diff_text):
-    """Extract valid new-file line ranges per file from unified diff."""
     ranges = {}
     current_file = None
     for line in diff_text.splitlines():
@@ -55,7 +43,6 @@ def parse_diff_ranges(diff_text):
 
 
 def validate_findings(findings, valid_ranges):
-    """Drop findings whose line numbers fall outside the diff."""
     validated = []
     for f in findings:
         path = f.get("file", "")
@@ -72,14 +59,16 @@ def validate_findings(findings, valid_ranges):
             print(f"::warning::Dropping finding with line {line} outside diff ranges for {path}")
             continue
         start_line = f.get("start_line")
-        if isinstance(start_line, int) and start_line > line:
-            f["start_line"] = None
+        if isinstance(start_line, int):
+            if start_line > line:
+                f["start_line"] = None
+            elif not any(s <= start_line <= e and s <= line <= e for s, e in file_ranges):
+                f["start_line"] = None
         validated.append(f)
     return validated
 
 
 def format_comment_body(finding):
-    """Build markdown body for an inline review comment."""
     sev = finding.get("severity", "NIT")
     icon = SEVERITY_ICON.get(sev, "⚪")
     body = f"**{icon} {sev}**\n\n{finding['description']}"
@@ -92,7 +81,6 @@ def format_comment_body(finding):
 
 
 def build_review_payload(findings, summary, is_incremental, sha, fragments):
-    """Construct the GitHub PR reviews API payload with unified body."""
     body_parts = ["## Uncut Gemini", ""]
 
     if is_incremental:
@@ -104,7 +92,7 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
         body_parts.append("")
 
     if not findings:
-        body_parts.append(f"### \U0001f50d Code Review — clean")
+        body_parts.append("### \U0001f50d Code Review — clean")
         body_parts.append("")
         body_parts.append(summary)
         return {
@@ -149,20 +137,6 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
     }
 
 
-# --- Read diff ---
-
-with open("/tmp/pr.diff") as f:
-    diff = f.read()
-
-if not diff.strip():
-    print("Empty diff — nothing to review")
-    sys.exit(0)
-
-valid_ranges = parse_diff_ranges(diff)
-fragments = read_fragments()
-
-# --- Build prompt ---
-
 SCHEMA_INSTRUCTIONS = """Response schema:
 {{
   "verdict": "clean | findings",
@@ -193,15 +167,37 @@ Suggested fix rules:
 - Must be syntactically complete for the replaced range
 - Set to null if no concrete fix exists or if the fix spans multiple locations"""
 
-if custom_prompt:
-    prompt = custom_prompt.replace("{diff}", diff).replace("{guidelines}", guidelines)
-    prompt = prompt.replace("{schema}", SCHEMA_INSTRUCTIONS)
-else:
-    preamble = "You are a code reviewer. Review this pull request diff for security vulnerabilities, stability risks, and convention compliance."
-    if incremental:
-        preamble += f"\n\nThis is an incremental review of commits since {last_reviewed_sha[:7]}. Focus exclusively on new and modified code."
 
-    prompt = f"""{preamble}
+def main():
+    api_key = os.environ["GOOGLE_API_KEY"]
+    guidelines = os.environ.get("REVIEW_GUIDELINES", "")
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+    min_severity = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
+    custom_prompt = os.environ.get("CUSTOM_PROMPT", "").strip()
+    extra_instructions = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
+    incremental = os.environ.get("INCREMENTAL", "false") == "true"
+    last_reviewed_sha = os.environ.get("LAST_REVIEWED_SHA", "")
+    min_rank = SEVERITY_RANK.get(min_severity, 1)
+
+    with open("/tmp/pr.diff") as f:
+        diff = f.read()
+
+    if not diff.strip():
+        print("Empty diff — nothing to review")
+        sys.exit(0)
+
+    valid_ranges = parse_diff_ranges(diff)
+    fragments = read_fragments()
+
+    if custom_prompt:
+        prompt = custom_prompt.replace("{diff}", diff).replace("{guidelines}", guidelines)
+        prompt = prompt.replace("{schema}", SCHEMA_INSTRUCTIONS)
+    else:
+        preamble = "You are a code reviewer. Review this pull request diff for security vulnerabilities, stability risks, and convention compliance."
+        if incremental:
+            preamble += f"\n\nThis is an incremental review of commits since {last_reviewed_sha[:7]}. Focus exclusively on new and modified code."
+
+        prompt = f"""{preamble}
 
 RULES:
 - Only review changed lines (+ prefixed in the diff) — do not flag pre-existing issues
@@ -219,94 +215,101 @@ Severity guide:
 {guidelines}
 </conventions>
 """
-    if extra_instructions:
-        prompt += f"""
+        if extra_instructions:
+            prompt += f"""
 <extra-instructions>
 {extra_instructions}
 </extra-instructions>
 """
-    prompt += f"""
+        prompt += f"""
 <diff>
 {diff}
 </diff>"""
 
-# --- Call Gemini ---
-
-payload = json.dumps({
-    "contents": [{"parts": [{"text": prompt}]}],
-    "generationConfig": {"temperature": 0.1}
-})
-
-url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-data = None
-for attempt in range(2):
-    req = urllib.request.Request(url, data=payload.encode(), headers={
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key,
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1}
     })
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    data = None
+    for attempt in range(2):
+        req = urllib.request.Request(url, data=payload.encode(), headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            if e.code in (429, 503) and attempt == 0:
+                print(f"Gemini returned {e.code}, retrying in 30s...")
+                time.sleep(30)
+                continue
+            print(f"::warning::Gemini API error {e.code}: {body[:200]}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"::warning::Gemini request failed: {e}")
+            sys.exit(1)
+
+    if "error" in data:
+        print(f"::warning::Gemini error: {data['error'].get('message', 'unknown')}")
+        sys.exit(1)
+
+    candidates = data.get("candidates", [])
+    if not candidates:
+        reason = data.get("promptFeedback", {}).get("blockReason", "no candidates")
+        print(f"::warning::Gemini blocked: {reason}")
+        sys.exit(1)
+
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-        break
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        if e.code in (429, 503) and attempt == 0:
-            print(f"Gemini returned {e.code}, retrying in 30s...")
-            time.sleep(30)
-            continue
-        print(f"::warning::Gemini API error {e.code}: {body[:200]}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"::warning::Gemini request failed: {e}")
+        parts = candidates[0]["content"]["parts"]
+        text = next(
+            (p["text"] for p in parts if "text" in p and not p.get("thought")),
+            parts[-1].get("text", "")
+        )
+        text = text.strip()
+    except (KeyError, IndexError, StopIteration, TypeError):
+        print("::warning::Gemini response had unexpected structure")
         sys.exit(1)
 
-if "error" in data:
-    print(f"::warning::Gemini error: {data['error'].get('message', 'unknown')}")
-    sys.exit(1)
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
 
-candidates = data.get("candidates", [])
-if not candidates:
-    reason = data.get("promptFeedback", {}).get("blockReason", "no candidates")
-    print(f"::warning::Gemini blocked: {reason}")
-    sys.exit(1)
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        if custom_prompt:
+            print("::warning::Custom prompt did not produce valid JSON. Ensure your prompt requests the expected response schema.")
+        else:
+            print(f"::warning::Gemini returned non-JSON: {text[:200]}")
+        sys.exit(1)
 
-text = candidates[0]["content"]["parts"][0]["text"].strip()
-text = re.sub(r"^```(?:json)?\s*", "", text)
-text = re.sub(r"\s*```$", "", text)
+    findings = [f for f in result.get("findings", [])
+                if SEVERITY_RANK.get(f.get("severity", "NIT"), 2) <= min_rank]
 
-try:
-    result = json.loads(text)
-except json.JSONDecodeError:
-    if custom_prompt:
-        print("::warning::Custom prompt did not produce valid JSON. Ensure your prompt requests the expected response schema.")
+    findings = validate_findings(findings, valid_ranges)
+
+    summary = result.get("summary", "No issues found.")
+
+    review_payload = build_review_payload(
+        findings, summary, incremental, last_reviewed_sha, fragments
+    )
+
+    with open("/tmp/review-payload.json", "w") as f:
+        json.dump(review_payload, f, indent=2)
+
+    with open("/tmp/review-summary.md", "w") as f:
+        f.write(review_payload["body"])
+
+    if findings:
+        print(f"Found {len(findings)} finding(s)")
     else:
-        print(f"::warning::Gemini returned non-JSON: {text[:200]}")
-    sys.exit(1)
+        print(f"Clean: {summary}")
 
-# --- Filter and validate findings ---
 
-findings = [f for f in result.get("findings", [])
-            if SEVERITY_RANK.get(f.get("severity", "NIT"), 2) <= min_rank]
-
-findings = validate_findings(findings, valid_ranges)
-
-summary = result.get("summary", "No issues found.")
-
-# --- Build outputs ---
-
-review_payload = build_review_payload(
-    findings, summary, incremental, last_reviewed_sha, fragments
-)
-
-with open("/tmp/review-payload.json", "w") as f:
-    json.dump(review_payload, f, indent=2)
-
-# Step summary (human-readable for Actions UI)
-with open("/tmp/review-summary.md", "w") as f:
-    f.write(review_payload["body"])
-
-if findings:
-    print(f"Found {len(findings)} finding(s)")
-else:
-    print(f"Clean: {summary}")
+if __name__ == "__main__":
+    main()

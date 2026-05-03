@@ -163,8 +163,8 @@ runs:
               # Extract added/removed packages from diff
               ADDED=$(echo "$DIFF_TEXT" | sed -n "/^diff --git a\/${lockfile//\//\\/}/,/^diff --git/p" | grep '^+' | grep -v '^+++' || true)
               REMOVED=$(echo "$DIFF_TEXT" | sed -n "/^diff --git a\/${lockfile//\//\\/}/,/^diff --git/p" | grep '^-' | grep -v '^---' || true)
-              ADD_COUNT=$(echo "$ADDED" | grep -c '.' 2>/dev/null || echo "0")
-              REM_COUNT=$(echo "$REMOVED" | grep -c '.' 2>/dev/null || echo "0")
+              ADD_COUNT=$(echo "$ADDED" | grep -c '.' || true)
+              REM_COUNT=$(echo "$REMOVED" | grep -c '.' || true)
               echo "  +${ADD_COUNT} / -${REM_COUNT} lines"
               echo ""
             done

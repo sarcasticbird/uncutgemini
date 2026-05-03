@@ -27,17 +27,20 @@ jobs:
           google-api-key: ${{ secrets.GOOGLE_API_KEY }}
 ```
 
-That's it. Every PR gets:
-- **Trivy** dependency scan — blocks merge on CRITICAL vulnerabilities, warns on HIGH
+That's it. Every PR gets a single unified review comment covering:
+- **Trivy** dependency scan — vulnerability table, blocks merge on CRITICAL
+- **PR size** warning when changes exceed threshold
+- **Dependency diff** summary when lockfiles change
 - **Gemini** code review — inline comments on specific lines with one-click `suggestion` fixes
 
 ## How It Works
 
-1. **Trivy scan** — scans the repo for known vulnerabilities in dependencies, writes a summary table to the Actions UI
-2. **Detect review scope** — checks for prior Gemini reviews on this PR; if found, fetches only the incremental diff since the last review
-3. **Gemini review** — sends the diff to Gemini with a structured prompt requesting line-targeted findings
-4. **Validate** — checks Gemini's line numbers against the actual diff ranges, drops invalid findings
-5. **Post review** — submits a GitHub PR review with inline comments and `suggestion` blocks
+1. **Trivy scan** — scans for known vulnerabilities, writes a summary table
+2. **PR stats** — calculates PR size, detects lockfile changes, summarizes dependency diffs
+3. **Detect review scope** — checks for prior Gemini reviews; if found, fetches only the incremental diff
+4. **Gemini review** — sends the diff to Gemini with a structured prompt requesting line-targeted findings
+5. **Validate** — checks Gemini's line numbers against the actual diff ranges, drops invalid findings
+6. **Post review** — submits one unified GitHub PR review combining all checks, with inline comments and `suggestion` blocks
 
 ## Inputs
 
@@ -52,6 +55,7 @@ That's it. Every PR gets:
 | `trivy` | No | `true` | Run Trivy dependency scan |
 | `trivy-severity` | No | `CRITICAL,HIGH` | Trivy severity threshold |
 | `trivy-block-on` | No | `CRITICAL` | Block merge at this level (`CRITICAL`, `HIGH`, or `NONE`) |
+| `size-warning` | No | `500` | Warn when PR exceeds this many changed lines (0 to disable) |
 
 ## Review Guidelines
 
@@ -87,9 +91,34 @@ Create `.github/review-guidelines.md` in your repo with project-specific convent
       <diff>{diff}</diff>
 ```
 
+## Unified Review Comment
+
+All checks roll up into a single PR review comment:
+
+```
+## Uncut Gemini
+
+### 🛡️ Dependencies — 1 critical, 2 high
+| Severity | Package | Installed | Fixed | CVE |
+| ...
+
+### 📏 Size — 847 lines across 12 files
+PRs over 500 lines are harder to review thoroughly.
+
+### 📦 Dependencies Changed
+**package-lock.json:** +42 / -18 lines
+
+### 🔍 Code Review — 2 finding(s) (1 high, 1 medium)
+Changes look solid but there are two security concerns.
+See inline comments below for details.
+```
+
+Gemini findings appear as inline comments on the specific lines they reference, with `suggestion` blocks for one-click apply.
+
 ## Review Behavior
 
-- **Inline comments** — findings appear on the lines they reference, with `suggestion` blocks for one-click apply
+- **Unified comment** — Trivy vulns, PR size, dependency changes, and code review all in one place
+- **Inline suggestions** — code findings appear on specific lines with one-click apply
 - **Incremental** — subsequent pushes only review new changes, skipping already-reviewed code
 - **Auto-approve** — clean PRs get an approval; PRs with findings get a non-blocking `COMMENT` review
 - **Graceful degradation** — invalid line numbers are dropped, Gemini API errors are warnings (never block merge)

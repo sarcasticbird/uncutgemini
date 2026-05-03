@@ -23,4 +23,5 @@ jobs:
           model: 'gemini-2.5-flash'
           min-severity: 'NIT'
           trivy-block-on: 'HIGH'
+          size-warning: '800'
           extra-instructions: 'Focus on SQL injection and auth bypass. Ignore CSS and test files.'

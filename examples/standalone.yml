@@ -56,11 +56,72 @@ jobs:
               ' trivy-results.json
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            {
+              echo "### 🛡️ Dependencies — ${CRITICAL} critical, ${HIGH} high"
+              echo ""
+              echo "| Severity | Package | Installed | Fixed | CVE |"
+              echo "|----------|---------|-----------|-------|-----|"
+              jq -r '
+                [.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")]
+                | sort_by(.Severity) | .[]
+                | "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "—") | \(.VulnerabilityID) |"
+              ' trivy-results.json
+            } > /tmp/trivy-fragment.md
+          else
+            echo "### 🛡️ Dependencies — clean" > /tmp/trivy-fragment.md
+          fi
+
           if [ "$CRITICAL" -gt 0 ]; then
             echo "::error::Found $CRITICAL CRITICAL vulnerabilities — merge blocked"
             exit 1
           fi
           if [ "$HIGH" -gt 0 ]; then echo "::warning::Found $HIGH HIGH vulnerabilities"; fi
+
+      # ── PR stats ───────────────────────────────────────────────
+      - name: PR stats
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIZE_THRESHOLD: '500'
+        run: |
+          STATS=$(gh pr diff "$PR_NUMBER" --stat 2>/dev/null | tail -1 || true)
+          FILES=$(echo "$STATS" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+          ADDITIONS=$(echo "$STATS" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+          DELETIONS=$(echo "$STATS" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+          TOTAL=$((ADDITIONS + DELETIONS))
+
+          if [ "$SIZE_THRESHOLD" -gt 0 ] && [ "$TOTAL" -gt "$SIZE_THRESHOLD" ]; then
+            echo "### ⚠️ PR Size — ${TOTAL} lines changed across ${FILES} files" > /tmp/size-fragment.md
+            echo "" >> /tmp/size-fragment.md
+            echo "PRs over ${SIZE_THRESHOLD} lines are harder to review thoroughly. Consider splitting into smaller PRs." >> /tmp/size-fragment.md
+          else
+            echo "### 📏 Size — ${TOTAL} lines across ${FILES} files" > /tmp/size-fragment.md
+          fi
+
+          LOCKFILES="package-lock.json yarn.lock pnpm-lock.yaml go.sum requirements.txt Pipfile.lock poetry.lock Gemfile.lock Cargo.lock"
+          CHANGED_LOCKS=""
+          DIFF_TEXT=$(gh pr diff "$PR_NUMBER" 2>/dev/null || true)
+          for lockfile in $LOCKFILES; do
+            if echo "$DIFF_TEXT" | grep -q "^diff --git a/$lockfile b/$lockfile"; then
+              CHANGED_LOCKS="$CHANGED_LOCKS $lockfile"
+            fi
+          done
+          if [ -n "$CHANGED_LOCKS" ]; then
+            {
+              echo "### 📦 Dependencies Changed"
+              echo ""
+              for lockfile in $CHANGED_LOCKS; do
+                echo "**${lockfile}:**"
+                ADDED=$(echo "$DIFF_TEXT" | sed -n "/^diff --git a\/${lockfile//\//\\/}/,/^diff --git/p" | grep '^+' | grep -v '^+++' || true)
+                REMOVED=$(echo "$DIFF_TEXT" | sed -n "/^diff --git a\/${lockfile//\//\\/}/,/^diff --git/p" | grep '^-' | grep -v '^---' || true)
+                ADD_COUNT=$(echo "$ADDED" | grep -c '.' || true)
+                REM_COUNT=$(echo "$REMOVED" | grep -c '.' || true)
+                echo "  +${ADD_COUNT} / -${REM_COUNT} lines"
+                echo ""
+              done
+            } > /tmp/deps-fragment.md
+          fi
 
       # ── Gemini code review ─────────────────────────────────────
       - name: Detect review scope
