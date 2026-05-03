@@ -1,0 +1,125 @@
+# .github/workflows/review.yml
+# Standalone version — copies all steps inline instead of referencing
+# the reusable action. Use this if you can't reference external actions
+# (e.g., GitHub Enterprise with restricted action sources).
+#
+# Also copy review.py to .github/scripts/review.py in your repo.
+#
+# Requires: GOOGLE_API_KEY set as a repository secret.
+name: Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: Review
+    runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Trivy dependency scan ──────────────────────────────────
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          format: 'json'
+          output: 'trivy-results.json'
+
+      - name: Trivy results
+        run: |
+          if [ ! -f trivy-results.json ]; then exit 0; fi
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-results.json)
+          {
+            echo "## Dependency Scan"
+            echo ""
+            if [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -eq 0 ]; then
+              echo "No HIGH or CRITICAL vulnerabilities found."
+            else
+              echo "| Severity | Package | Installed | Fixed | CVE |"
+              echo "|----------|---------|-----------|-------|-----|"
+              jq -r '
+                [.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")]
+                | sort_by(.Severity) | .[]
+                | "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "—") | \(.VulnerabilityID) |"
+              ' trivy-results.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::Found $CRITICAL CRITICAL vulnerabilities — merge blocked"
+            exit 1
+          fi
+          if [ "$HIGH" -gt 0 ]; then echo "::warning::Found $HIGH HIGH vulnerabilities"; fi
+
+      # ── Gemini code review ─────────────────────────────────────
+      - name: Detect review scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          LAST_SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "github-actions[bot]")] | sort_by(.submitted_at) | last | .commit_id // empty' 2>/dev/null || true)
+          if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CURRENT_SHA" ]; then
+            echo "SKIP_REVIEW=true" >> "$GITHUB_ENV"
+          elif [ -n "$LAST_SHA" ]; then
+            echo "INCREMENTAL=true" >> "$GITHUB_ENV"
+            echo "LAST_REVIEWED_SHA=$LAST_SHA" >> "$GITHUB_ENV"
+          else
+            echo "INCREMENTAL=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Get PR diff
+        if: env.SKIP_REVIEW != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$INCREMENTAL" = "true" ]; then
+            CURRENT_SHA="${{ github.event.pull_request.head.sha }}"
+            gh api "repos/$GITHUB_REPOSITORY/compare/${LAST_REVIEWED_SHA}...${CURRENT_SHA}" \
+              --jq '.files[] | "diff --git a/\(.filename) b/\(.filename)\n\(.patch // "")"' \
+              > /tmp/pr.diff 2>/dev/null || true
+          fi
+          if [ ! -s /tmp/pr.diff ]; then
+            gh pr diff "$PR_NUMBER" > /tmp/pr.diff
+            echo "INCREMENTAL=false" >> "$GITHUB_ENV"
+          fi
+          if [ ! -s /tmp/pr.diff ]; then
+            echo "SKIP_REVIEW=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run Gemini review
+        if: env.SKIP_REVIEW != 'true'
+        continue-on-error: true
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GEMINI_MODEL: 'gemini-2.5-pro'
+          MIN_SEVERITY: 'MEDIUM'
+        run: |
+          if [ -f ".github/review-guidelines.md" ]; then
+            export REVIEW_GUIDELINES="$(cat .github/review-guidelines.md)"
+          fi
+          python3 .github/scripts/review.py
+
+      - name: Post review
+        if: always() && env.SKIP_REVIEW != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f /tmp/review-summary.md ]; then
+            cat /tmp/review-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f /tmp/review-payload.json ]; then
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+              --method POST --input /tmp/review-payload.json
+          fi

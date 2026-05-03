@@ -1,0 +1,252 @@
+name: 'Uncut Gemini'
+description: 'AI code review + dependency scanning + PR hygiene — one action, full picture'
+
+inputs:
+  google-api-key:
+    description: 'Google AI API key for Gemini'
+    required: true
+  model:
+    description: 'Gemini model to use'
+    required: false
+    default: 'gemini-2.5-pro'
+  guidelines-file:
+    description: 'Path to repo-specific review guidelines (markdown)'
+    required: false
+    default: '.github/review-guidelines.md'
+  min-severity:
+    description: 'Minimum review severity to report (HIGH, MEDIUM, NIT)'
+    required: false
+    default: 'MEDIUM'
+  extra-instructions:
+    description: 'Additional instructions appended to the review prompt'
+    required: false
+    default: ''
+  custom-prompt:
+    description: 'Full replacement prompt. Use {diff}, {guidelines}, {schema} placeholders.'
+    required: false
+    default: ''
+  trivy:
+    description: 'Run Trivy dependency scan (true/false)'
+    required: false
+    default: 'true'
+  trivy-severity:
+    description: 'Trivy severity threshold (comma-separated)'
+    required: false
+    default: 'CRITICAL,HIGH'
+  trivy-block-on:
+    description: 'Block merge if vulnerabilities at this level exist (CRITICAL, HIGH, or NONE to never block)'
+    required: false
+    default: 'CRITICAL'
+  size-warning:
+    description: 'Warn when PR exceeds this many changed lines (0 to disable)'
+    required: false
+    default: '500'
+
+runs:
+  using: 'composite'
+  steps:
+    # ── Trivy dependency scan ──────────────────────────────────────
+    - name: Trivy scan
+      if: inputs.trivy == 'true'
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        severity: ${{ inputs.trivy-severity }}
+        exit-code: '0'
+        format: 'json'
+        output: 'trivy-results.json'
+
+    - name: Trivy results
+      if: inputs.trivy == 'true'
+      shell: bash
+      env:
+        BLOCK_ON: ${{ inputs.trivy-block-on }}
+      run: |
+        if [ ! -f trivy-results.json ]; then
+          echo "::warning::Trivy scan produced no output"
+          exit 0
+        fi
+
+        CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-results.json)
+        HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-results.json)
+
+        # Step summary
+        {
+          echo "## Dependency Scan"
+          echo ""
+          if [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -eq 0 ]; then
+            echo "No HIGH or CRITICAL vulnerabilities found."
+          else
+            echo "| Severity | Package | Installed | Fixed | CVE |"
+            echo "|----------|---------|-----------|-------|-----|"
+            jq -r '
+              [.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")]
+              | sort_by(.Severity)
+              | .[]
+              | "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "—") | \(.VulnerabilityID) |"
+            ' trivy-results.json
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Review fragment for unified comment
+        if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+          {
+            echo "### \U0001f6e1️ Dependencies — ${CRITICAL} critical, ${HIGH} high"
+            echo ""
+            echo "| Severity | Package | Installed | Fixed | CVE |"
+            echo "|----------|---------|-----------|-------|-----|"
+            jq -r '
+              [.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")]
+              | sort_by(.Severity)
+              | .[]
+              | "| \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "—") | \(.VulnerabilityID) |"
+            ' trivy-results.json
+          } > /tmp/trivy-fragment.md
+        else
+          echo "### \U0001f6e1️ Dependencies — clean" > /tmp/trivy-fragment.md
+        fi
+
+        if [ "$BLOCK_ON" = "CRITICAL" ] && [ "$CRITICAL" -gt 0 ]; then
+          echo "::error::Found $CRITICAL CRITICAL vulnerabilities — merge blocked"
+          exit 1
+        elif [ "$BLOCK_ON" = "HIGH" ] && [ "$((CRITICAL + HIGH))" -gt 0 ]; then
+          echo "::error::Found $CRITICAL critical + $HIGH high vulnerabilities — merge blocked"
+          exit 1
+        fi
+
+        if [ "$HIGH" -gt 0 ]; then
+          echo "::warning::Found $HIGH HIGH vulnerabilities"
+        fi
+
+    # ── PR size + dependency diff ──────────────────────────────────
+    - name: PR stats
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        SIZE_THRESHOLD: ${{ inputs.size-warning }}
+      run: |
+        # PR size
+        STATS=$(gh pr diff "$PR_NUMBER" --stat 2>/dev/null | tail -1 || true)
+        FILES=$(echo "$STATS" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+        ADDITIONS=$(echo "$STATS" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+        DELETIONS=$(echo "$STATS" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+        TOTAL=$((ADDITIONS + DELETIONS))
+
+        if [ "$SIZE_THRESHOLD" -gt 0 ] && [ "$TOTAL" -gt "$SIZE_THRESHOLD" ]; then
+          echo "### ⚠️ PR Size — ${TOTAL} lines changed across ${FILES} files" > /tmp/size-fragment.md
+          echo "" >> /tmp/size-fragment.md
+          echo "PRs over ${SIZE_THRESHOLD} lines are harder to review thoroughly. Consider splitting into smaller PRs." >> /tmp/size-fragment.md
+          echo "::warning::Large PR: ${TOTAL} lines changed across ${FILES} files"
+        else
+          echo "### \U0001f4cf Size — ${TOTAL} lines across ${FILES} files" > /tmp/size-fragment.md
+        fi
+
+        # Dependency diff (lockfile changes)
+        LOCKFILES="package-lock.json yarn.lock pnpm-lock.yaml go.sum requirements.txt Pipfile.lock poetry.lock Gemfile.lock Cargo.lock"
+        CHANGED_LOCKS=""
+        DIFF_TEXT=$(gh pr diff "$PR_NUMBER" 2>/dev/null || true)
+
+        for lockfile in $LOCKFILES; do
+          if echo "$DIFF_TEXT" | grep -q "^diff --git a/$lockfile b/$lockfile"; then
+            CHANGED_LOCKS="$CHANGED_LOCKS $lockfile"
+          fi
+        done
+
+        if [ -n "$CHANGED_LOCKS" ]; then
+          {
+            echo "### \U0001f4e6 Dependencies Changed"
+            echo ""
+            for lockfile in $CHANGED_LOCKS; do
+              echo "**${lockfile}:**"
+              # Extract added/removed packages from diff
+              ADDED=$(echo "$DIFF_TEXT" | sed -n "/^diff --git a\/${lockfile//\//\\/}/,/^diff --git/p" | grep '^+' | grep -v '^+++' || true)
+              REMOVED=$(echo "$DIFF_TEXT" | sed -n "/^diff --git a\/${lockfile//\//\\/}/,/^diff --git/p" | grep '^-' | grep -v '^---' || true)
+              ADD_COUNT=$(echo "$ADDED" | grep -c '.' 2>/dev/null || echo "0")
+              REM_COUNT=$(echo "$REMOVED" | grep -c '.' 2>/dev/null || echo "0")
+              echo "  +${ADD_COUNT} / -${REM_COUNT} lines"
+              echo ""
+            done
+          } > /tmp/deps-fragment.md
+        fi
+
+    # ── Gemini code review ─────────────────────────────────────────
+    - name: Detect review scope
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        CURRENT_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        LAST_SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+          --jq '[.[] | select(.user.login == "github-actions[bot]")] | sort_by(.submitted_at) | last | .commit_id // empty' 2>/dev/null || true)
+
+        if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CURRENT_SHA" ]; then
+          echo "Already reviewed at $CURRENT_SHA — skipping"
+          echo "SKIP_REVIEW=true" >> "$GITHUB_ENV"
+        elif [ -n "$LAST_SHA" ]; then
+          echo "Incremental review: $LAST_SHA → $CURRENT_SHA"
+          echo "INCREMENTAL=true" >> "$GITHUB_ENV"
+          echo "LAST_REVIEWED_SHA=$LAST_SHA" >> "$GITHUB_ENV"
+        else
+          echo "First review for this PR"
+          echo "INCREMENTAL=false" >> "$GITHUB_ENV"
+        fi
+
+    - name: Get PR diff
+      if: env.SKIP_REVIEW != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        if [ "$INCREMENTAL" = "true" ]; then
+          CURRENT_SHA="${{ github.event.pull_request.head.sha }}"
+          gh api "repos/$GITHUB_REPOSITORY/compare/${LAST_REVIEWED_SHA}...${CURRENT_SHA}" \
+            --jq '.files[] | "diff --git a/\(.filename) b/\(.filename)\n\(.patch // "")"' \
+            > /tmp/pr.diff 2>/dev/null || true
+        fi
+
+        if [ ! -s /tmp/pr.diff ]; then
+          gh pr diff "$PR_NUMBER" > /tmp/pr.diff
+          echo "INCREMENTAL=false" >> "$GITHUB_ENV"
+        fi
+
+        if [ ! -s /tmp/pr.diff ]; then
+          echo "Empty diff — skipping review"
+          echo "SKIP_REVIEW=true" >> "$GITHUB_ENV"
+        fi
+
+    - name: Run Gemini review
+      if: env.SKIP_REVIEW != 'true'
+      shell: bash
+      continue-on-error: true
+      env:
+        GOOGLE_API_KEY: ${{ inputs.google-api-key }}
+        GEMINI_MODEL: ${{ inputs.model }}
+        MIN_SEVERITY: ${{ inputs.min-severity }}
+        GUIDELINES_FILE: ${{ inputs.guidelines-file }}
+        EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
+        CUSTOM_PROMPT: ${{ inputs.custom-prompt }}
+      run: |
+        if [ -f "$GUIDELINES_FILE" ]; then
+          export REVIEW_GUIDELINES="$(cat "$GUIDELINES_FILE")"
+        fi
+        python3 ${{ github.action_path }}/review.py
+
+    - name: Post review
+      if: always() && env.SKIP_REVIEW != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        if [ -f /tmp/review-summary.md ]; then
+          cat /tmp/review-summary.md >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ -f /tmp/review-payload.json ]; then
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --method POST \
+            --input /tmp/review-payload.json
+        fi
