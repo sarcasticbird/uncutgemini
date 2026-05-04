@@ -41,10 +41,43 @@ inputs:
     description: 'Warn when PR exceeds this many changed lines (0 to disable)'
     required: false
     default: '500'
+  pr-number:
+    description: 'PR number to review (auto-detected from pull_request event if omitted)'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
   steps:
+    # ── Resolve PR context ────────────────────────────────────────
+    - name: Resolve PR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        PR_NUMBER="${INPUT_PR_NUMBER:-$EVENT_PR_NUMBER}"
+        if [ -z "$PR_NUMBER" ]; then
+          PR_NUMBER=$(gh pr view --json number --jq '.number' 2>/dev/null || true)
+        fi
+        if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+          echo "::error::No valid PR number — pass pr-number input or trigger from a pull_request event"
+          exit 1
+        fi
+        HEAD_SHA="${EVENT_HEAD_SHA}"
+        if [ -z "$HEAD_SHA" ]; then
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+        fi
+        if [ -z "$HEAD_SHA" ]; then
+          echo "::error::Could not resolve HEAD SHA for PR #${PR_NUMBER}"
+          exit 1
+        fi
+        echo "UG_PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
+        echo "UG_HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+        echo "Reviewing PR #${PR_NUMBER} at ${HEAD_SHA:0:7}"
+
     # ── Trivy dependency scan ──────────────────────────────────────
     - name: Trivy scan
       if: inputs.trivy == 'true'
@@ -124,7 +157,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.UG_PR_NUMBER }}
         SIZE_THRESHOLD: ${{ inputs.size-warning }}
       run: |
         # PR size
@@ -176,8 +209,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        CURRENT_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_NUMBER: ${{ env.UG_PR_NUMBER }}
+        CURRENT_SHA: ${{ env.UG_HEAD_SHA }}
       run: |
         LAST_SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
           --jq '[.[] | select(.user.login == "github-actions[bot]")] | sort_by(.submitted_at) | last | .commit_id // empty' 2>/dev/null || true)
@@ -199,10 +232,10 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.UG_PR_NUMBER }}
       run: |
         if [ "$INCREMENTAL" = "true" ]; then
-          CURRENT_SHA="${{ github.event.pull_request.head.sha }}"
+          CURRENT_SHA="${{ env.UG_HEAD_SHA }}"
           gh api "repos/$GITHUB_REPOSITORY/compare/${LAST_REVIEWED_SHA}...${CURRENT_SHA}" \
             --jq '.files[] | "diff --git a/\(.filename) b/\(.filename)\n\(.patch // "")"' \
             > /tmp/pr.diff 2>/dev/null || true
@@ -240,7 +273,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.UG_PR_NUMBER }}
       run: |
         if [ -f /tmp/review-summary.md ]; then
           cat /tmp/review-summary.md >> "$GITHUB_STEP_SUMMARY"

@@ -6,6 +6,11 @@ name: Code Review
 on:
   pull_request:
     types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: 'PR number to review'
+        required: true
 
 permissions:
   contents: read
@@ -25,3 +30,4 @@ jobs:
           trivy-block-on: 'HIGH'
           size-warning: '800'
           extra-instructions: 'Focus on SQL injection and auth bypass. Ignore CSS and test files.'
+          pr-number: ${{ github.event.inputs.pr-number }}
