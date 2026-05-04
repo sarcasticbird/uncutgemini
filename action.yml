@@ -161,10 +161,10 @@ runs:
         SIZE_THRESHOLD: ${{ inputs.size-warning }}
       run: |
         # PR size
-        STATS=$(gh pr diff "$PR_NUMBER" --stat 2>/dev/null | tail -1 || true)
-        FILES=$(echo "$STATS" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
-        ADDITIONS=$(echo "$STATS" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-        DELETIONS=$(echo "$STATS" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+        PR_JSON=$(gh pr view "$PR_NUMBER" --json additions,deletions,changedFiles 2>/dev/null || echo '{}')
+        ADDITIONS=$(echo "$PR_JSON" | jq '.additions // 0')
+        DELETIONS=$(echo "$PR_JSON" | jq '.deletions // 0')
+        FILES=$(echo "$PR_JSON" | jq '.changedFiles // 0')
         TOTAL=$((ADDITIONS + DELETIONS))
 
         if [ "$SIZE_THRESHOLD" -gt 0 ] && [ "$TOTAL" -gt "$SIZE_THRESHOLD" ]; then
