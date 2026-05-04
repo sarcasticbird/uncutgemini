@@ -21,7 +21,6 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: sarcasticbird/uncutgemini@v1
         with:
           google-api-key: ${{ secrets.GOOGLE_API_KEY }}
@@ -52,7 +51,6 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: sarcasticbird/uncutgemini@v1
         with:
           google-api-key: ${{ secrets.GOOGLE_API_KEY }}

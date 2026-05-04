@@ -78,6 +78,13 @@ runs:
         echo "UG_HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
         echo "Reviewing PR #${PR_NUMBER} at ${HEAD_SHA:0:7}"
 
+    # ── Checkout PR head ──────────────────────────────────────────
+    - name: Checkout PR head
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ env.UG_HEAD_SHA }}
+        persist-credentials: false
+
     # ── Trivy dependency scan ──────────────────────────────────────
     - name: Trivy scan
       if: inputs.trivy == 'true'
