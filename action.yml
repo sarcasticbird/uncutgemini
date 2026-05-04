@@ -125,7 +125,7 @@ runs:
         # Review fragment for unified comment
         if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
           {
-            echo "### \U0001f6e1️ Dependencies — ${CRITICAL} critical, ${HIGH} high"
+            echo "### 🛡️ Dependencies — ${CRITICAL} critical, ${HIGH} high"
             echo ""
             echo "| Severity | Package | Installed | Fixed | CVE |"
             echo "|----------|---------|-----------|-------|-----|"
@@ -137,7 +137,7 @@ runs:
             ' trivy-results.json
           } > /tmp/trivy-fragment.md
         else
-          echo "### \U0001f6e1️ Dependencies — clean" > /tmp/trivy-fragment.md
+          echo "### 🛡️ Dependencies — clean" > /tmp/trivy-fragment.md
         fi
 
         if [ "$BLOCK_ON" = "CRITICAL" ] && [ "$CRITICAL" -gt 0 ]; then
@@ -173,7 +173,7 @@ runs:
           echo "PRs over ${SIZE_THRESHOLD} lines are harder to review thoroughly. Consider splitting into smaller PRs." >> /tmp/size-fragment.md
           echo "::warning::Large PR: ${TOTAL} lines changed across ${FILES} files"
         else
-          echo "### \U0001f4cf Size — ${TOTAL} lines across ${FILES} files" > /tmp/size-fragment.md
+          echo "### 📏 Size — ${TOTAL} lines across ${FILES} files" > /tmp/size-fragment.md
         fi
 
         # Dependency diff (lockfile changes)
@@ -189,7 +189,7 @@ runs:
 
         if [ -n "$CHANGED_LOCKS" ]; then
           {
-            echo "### \U0001f4e6 Dependencies Changed"
+            echo "### 📦 Dependencies Changed"
             echo ""
             for lockfile in $CHANGED_LOCKS; do
               echo "**${lockfile}:**"

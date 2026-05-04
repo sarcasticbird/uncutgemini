@@ -1,7 +1,7 @@
 import json, os, re, sys, time, urllib.request, urllib.error
 
 SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "NIT": 2}
-SEVERITY_ICON = {"HIGH": "\U0001f534", "MEDIUM": "\U0001f7e1", "NIT": "\U0001f535"}
+SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟡", "NIT": "🔵"}
 
 FRAGMENT_FILES = [
     "/tmp/trivy-fragment.md",
@@ -92,7 +92,7 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
         body_parts.append("")
 
     if not findings:
-        body_parts.append("### \U0001f50d Code Review — clean")
+        body_parts.append("### 🔍 Code Review — clean")
         body_parts.append("")
         body_parts.append(summary)
         return {
@@ -110,7 +110,8 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
         f"{nit} nit" if nit else "",
     ] if p)
 
-    body_parts.append(f"### \U0001f50d Code Review — {len(findings)} finding(s) ({counts})")
+    noun = "finding" if len(findings) == 1 else "findings"
+    body_parts.append(f"### 🔍 Code Review — {len(findings)} {noun} ({counts})")
     body_parts.append("")
     body_parts.append(summary)
     body_parts.append("")
