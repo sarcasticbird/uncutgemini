@@ -96,7 +96,7 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
         body_parts.append("")
         body_parts.append(summary)
         return {
-            "event": "APPROVE",
+            "event": "COMMENT",
             "body": "\n".join(body_parts),
             "comments": []
         }
