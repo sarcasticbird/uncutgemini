@@ -149,10 +149,10 @@ runs:
 
         if [ "$BLOCK_ON" = "CRITICAL" ] && [ "$CRITICAL" -gt 0 ]; then
           echo "::error::Found $CRITICAL CRITICAL vulnerabilities — merge blocked"
-          exit 1
+          echo "UG_TRIVY_BLOCKED=true" >> "$GITHUB_ENV"
         elif [ "$BLOCK_ON" = "HIGH" ] && [ "$((CRITICAL + HIGH))" -gt 0 ]; then
           echo "::error::Found $CRITICAL critical + $HIGH high vulnerabilities — merge blocked"
-          exit 1
+          echo "UG_TRIVY_BLOCKED=true" >> "$GITHUB_ENV"
         fi
 
         if [ "$HIGH" -gt 0 ]; then
@@ -290,3 +290,11 @@ runs:
             --method POST \
             --input /tmp/review-payload.json
         fi
+
+    # ── Fail job if Trivy blocked merge ────────────────────────────
+    - name: Block merge
+      if: always() && env.UG_TRIVY_BLOCKED == 'true'
+      shell: bash
+      run: |
+        echo "::error::Trivy found vulnerabilities that block merge — see review comment for details"
+        exit 1
