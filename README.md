@@ -28,6 +28,44 @@ jobs:
 ```
 
 That's it. Every PR gets a single unified review comment covering:
+
+## Manual Trigger
+
+Add `workflow_dispatch` to re-run reviews on demand (useful when Gemini hits rate limits or you want a fresh review):
+
+```yaml
+name: Code Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: 'PR number to review'
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sarcasticbird/uncutgemini@v1
+        with:
+          google-api-key: ${{ secrets.GOOGLE_API_KEY }}
+          pr-number: ${{ github.event.inputs.pr-number }}
+```
+
+Trigger from the GitHub UI (Actions → Code Review → Run workflow) or the CLI:
+
+```bash
+gh workflow run review.yml -f pr-number=109
+```
+
+Every PR gets a single unified review comment covering:
 - **Trivy** dependency scan — vulnerability table, blocks merge on CRITICAL
 - **PR size** warning when changes exceed threshold
 - **Dependency diff** summary when lockfiles change
@@ -56,6 +94,7 @@ That's it. Every PR gets a single unified review comment covering:
 | `trivy-severity` | No | `CRITICAL,HIGH` | Trivy severity threshold |
 | `trivy-block-on` | No | `CRITICAL` | Block merge at this level (`CRITICAL`, `HIGH`, or `NONE`) |
 | `size-warning` | No | `500` | Warn when PR exceeds this many changed lines (0 to disable) |
+| `pr-number` | No | *(auto-detected)* | PR number to review (for manual/`workflow_dispatch` triggers) |
 
 ## Review Guidelines
 
