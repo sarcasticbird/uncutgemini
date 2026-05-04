@@ -122,7 +122,7 @@ class TestFormatCommentBody(unittest.TestCase):
 class TestBuildReviewPayload(unittest.TestCase):
     def test_clean_review(self):
         payload = build_review_payload([], "All good.", False, "", [])
-        self.assertEqual(payload["event"], "APPROVE")
+        self.assertEqual(payload["event"], "COMMENT")
         self.assertEqual(payload["comments"], [])
         self.assertIn("clean", payload["body"])
 
