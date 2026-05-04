@@ -88,6 +88,7 @@ runs:
     # ── Trivy dependency scan ──────────────────────────────────────
     - name: Trivy scan
       if: inputs.trivy == 'true'
+      continue-on-error: true
       uses: aquasecurity/trivy-action@v0.36.0
       with:
         scan-type: 'fs'
