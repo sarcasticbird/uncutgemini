@@ -4,6 +4,7 @@ from review import (
     validate_findings,
     format_comment_body,
     build_review_payload,
+    build_failure_payload,
 )
 
 SAMPLE_DIFF = """diff --git a/src/app.py b/src/app.py
@@ -154,6 +155,27 @@ class TestBuildReviewPayload(unittest.TestCase):
         comment = payload["comments"][0]
         self.assertEqual(comment["start_line"], 10)
         self.assertEqual(comment["start_side"], "RIGHT")
+
+
+class TestBuildFailurePayload(unittest.TestCase):
+    def test_failure_includes_reason(self):
+        payload = build_failure_payload("timed out after 120s", False, "", [])
+        self.assertEqual(payload["event"], "COMMENT")
+        self.assertEqual(payload["comments"], [])
+        self.assertIn("Code Review — failed", payload["body"])
+        self.assertIn("timed out after 120s", payload["body"])
+
+    def test_failure_includes_fragments(self):
+        fragments = ["### 🛡️ Dependencies — clean", "### 📏 Size — 50 lines"]
+        payload = build_failure_payload("api error", False, "", fragments)
+        self.assertIn("Dependencies", payload["body"])
+        self.assertIn("Size", payload["body"])
+        self.assertIn("api error", payload["body"])
+
+    def test_failure_incremental_prefix(self):
+        payload = build_failure_payload("blocked", True, "abc1234567", [])
+        self.assertIn("abc1234", payload["body"])
+        self.assertIn("Incremental review", payload["body"])
 
 
 if __name__ == "__main__":
