@@ -1,4 +1,4 @@
-import json, os, re, sys, time, urllib.request, urllib.error
+import json, os, re, socket, sys, time, urllib.request, urllib.error
 
 SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "NIT": 2}
 SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟡", "NIT": "🔵"}
@@ -78,6 +78,43 @@ def format_comment_body(finding):
         fix = re.sub(r"\s*```$", "", fix)
         body += f"\n\n```suggestion\n{fix}\n```"
     return body
+
+
+def build_failure_payload(reason, is_incremental, sha, fragments):
+    body_parts = ["## Uncut Gemini", ""]
+
+    if is_incremental:
+        body_parts.append(f"*Incremental review — commits since `{sha[:7]}`*")
+        body_parts.append("")
+
+    for fragment in fragments:
+        body_parts.append(fragment)
+        body_parts.append("")
+
+    body_parts.append("### 🔍 Code Review — failed")
+    body_parts.append("")
+    body_parts.append(f"Gemini review did not complete: {reason}")
+    body_parts.append("")
+    body_parts.append("See the workflow logs for details. Trivy and PR-stats results above are unaffected.")
+
+    return {
+        "event": "COMMENT",
+        "body": "\n".join(body_parts),
+        "comments": []
+    }
+
+
+def write_payload(payload):
+    with open("/tmp/review-payload.json", "w") as f:
+        json.dump(payload, f, indent=2)
+    with open("/tmp/review-summary.md", "w") as f:
+        f.write(payload["body"])
+
+
+def fail_with_payload(reason, is_incremental, sha, fragments):
+    print(f"::warning::{reason}")
+    write_payload(build_failure_payload(reason, is_incremental, sha, fragments))
+    sys.exit(0)
 
 
 def build_review_payload(findings, summary, is_incremental, sha, fragments):
@@ -235,6 +272,7 @@ Severity guide:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     data = None
+    last_error = None
     for attempt in range(2):
         req = urllib.request.Request(url, data=payload.encode(), headers={
             "Content-Type": "application/json",
@@ -250,21 +288,39 @@ Severity guide:
                 print(f"Gemini returned {e.code}, retrying in 30s...")
                 time.sleep(30)
                 continue
-            print(f"::warning::Gemini API error {e.code}: {body[:200]}")
-            sys.exit(1)
+            last_error = f"Gemini API error {e.code}: {body[:200]}"
+            break
+        except (socket.timeout, TimeoutError) as e:
+            if attempt == 0:
+                print(f"Gemini request timed out, retrying in 30s...")
+                time.sleep(30)
+                continue
+            last_error = f"Gemini request timed out: {e}"
+            break
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, (socket.timeout, TimeoutError)) and attempt == 0:
+                print(f"Gemini request timed out, retrying in 30s...")
+                time.sleep(30)
+                continue
+            last_error = f"Gemini request failed: {e}"
+            break
         except Exception as e:
-            print(f"::warning::Gemini request failed: {e}")
-            sys.exit(1)
+            last_error = f"Gemini request failed: {e}"
+            break
+
+    if data is None:
+        fail_with_payload(last_error or "Gemini request failed", incremental, last_reviewed_sha, fragments)
 
     if "error" in data:
-        print(f"::warning::Gemini error: {data['error'].get('message', 'unknown')}")
-        sys.exit(1)
+        fail_with_payload(
+            f"Gemini error: {data['error'].get('message', 'unknown')}",
+            incremental, last_reviewed_sha, fragments,
+        )
 
     candidates = data.get("candidates", [])
     if not candidates:
         reason = data.get("promptFeedback", {}).get("blockReason", "no candidates")
-        print(f"::warning::Gemini blocked: {reason}")
-        sys.exit(1)
+        fail_with_payload(f"Gemini blocked: {reason}", incremental, last_reviewed_sha, fragments)
 
     try:
         parts = candidates[0]["content"]["parts"]
@@ -274,8 +330,7 @@ Severity guide:
         )
         text = text.strip()
     except (KeyError, IndexError, StopIteration, TypeError):
-        print("::warning::Gemini response had unexpected structure")
-        sys.exit(1)
+        fail_with_payload("Gemini response had unexpected structure", incremental, last_reviewed_sha, fragments)
 
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -284,10 +339,10 @@ Severity guide:
         result = json.loads(text)
     except json.JSONDecodeError:
         if custom_prompt:
-            print("::warning::Custom prompt did not produce valid JSON. Ensure your prompt requests the expected response schema.")
+            reason = "Custom prompt did not produce valid JSON. Ensure your prompt requests the expected response schema."
         else:
-            print(f"::warning::Gemini returned non-JSON: {text[:200]}")
-        sys.exit(1)
+            reason = f"Gemini returned non-JSON: {text[:200]}"
+        fail_with_payload(reason, incremental, last_reviewed_sha, fragments)
 
     findings = [f for f in result.get("findings", [])
                 if SEVERITY_RANK.get(f.get("severity", "NIT"), 2) <= min_rank]
@@ -300,11 +355,7 @@ Severity guide:
         findings, summary, incremental, last_reviewed_sha, fragments
     )
 
-    with open("/tmp/review-payload.json", "w") as f:
-        json.dump(review_payload, f, indent=2)
-
-    with open("/tmp/review-summary.md", "w") as f:
-        f.write(review_payload["body"])
+    write_payload(review_payload)
 
     if findings:
         print(f"Found {len(findings)} finding(s)")

@@ -106,6 +106,7 @@ runs:
       run: |
         if [ ! -f trivy-results.json ]; then
           echo "::warning::Trivy scan produced no output"
+          echo "### 🛡️ Dependencies — scan failed (see workflow logs)" > /tmp/trivy-fragment.md
           exit 0
         fi
 
