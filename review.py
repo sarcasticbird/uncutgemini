@@ -239,6 +239,7 @@ def main():
 
 RULES:
 - Only review changed lines (+ prefixed in the diff) — do not flag pre-existing issues
+- Do not suggest GitHub Actions version changes — you lack real-time knowledge of releases and your suggestions may be incorrect or a downgrade
 - Return ONLY a JSON object — no markdown fences, no explanation
 - If no issues found, return: {{"verdict": "clean", "summary": "one sentence", "findings": []}}
 
