@@ -1,13 +1,84 @@
-import json, os, re, socket, sys, time, urllib.request, urllib.error
+import hashlib, json, os, random, re, socket, sys, time, urllib.request, urllib.error
 
 SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "NIT": 2}
 SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟡", "NIT": "🔵"}
+
+CLEAN_GIFS = [
+    "https://media1.tenor.com/m/sd5tCOCmWJEAAAAd/uncut-gems-adam-sandler.gif",
+    "https://media1.tenor.com/m/yuaLtvK1EzkAAAAd/adam-sandler-holy-shit.gif",
+    "https://media1.tenor.com/m/xA3s3BQljhcAAAAd/adam-sandler-holy-shit.gif",
+    "https://media1.tenor.com/m/ZRg1BKdwMVoAAAAd/movies-uncut-gems.gif",
+    "https://media1.tenor.com/m/nz3H_V9w618AAAAd/uncut-gems-sports-betting.gif",
+    "https://media1.tenor.com/m/IJNIeH7J2ocAAAAd/uncut-gems.gif",
+    "https://media1.tenor.com/m/CuYzSa1ieQgAAAAd/gems-uncut.gif",
+    "https://media.giphy.com/media/H7rPe2vxtmKgBkLwTV/giphy.gif",
+    "https://media.giphy.com/media/U5OkjycImlnwYOjamO/giphy.gif",
+    "https://media.giphy.com/media/SuHrYhmcdQNHXMhzW5/giphy.gif",
+    "https://media.giphy.com/media/zEi4GxeSWEYXyCkrpq/giphy.gif",
+    "https://media.giphy.com/media/oheHGUekl2IT33otTk/giphy.gif",
+    "https://media.giphy.com/media/MbMKD1zec72gaKHRmL/giphy.gif",
+    "https://media1.tenor.com/m/Eo79iCWoTMEAAAAd/happy-gilmore-adam-sandler.gif",
+    "https://media1.tenor.com/m/Yfd-zivMy14AAAAd/happy-gilmore-adam-sandler.gif",
+    "https://media1.tenor.com/m/Su0fjTifD3cAAAAd/happy-gilmore-adam-sandler.gif",
+    "https://media1.tenor.com/m/WMqy36VQ4hMAAAAd/big-daddy-adam-sandler.gif",
+    "https://media1.tenor.com/m/g_5VNFbAcasAAAAd/adam-sandler-happy.gif",
+]
+
+FINDINGS_QUOTES = [
+    "This is how I win.",
+    "I'm so f**kin' far from worried, you have no idea.",
+    "Everything I do is not as crazy as it seems.",
+    "No, this is me. This is how I win.",
+    "You wanna bet? You wanna f**kin' bet?",
+    "I just made a really big bet and I need you to trust me.",
+    "I'm not gonna f**k this up.",
+    "I got it under control.",
+    "I know what I'm doing!",
+    "This is the kind of s**t I do, Arno.",
+    "I got a system.",
+    "It's all coming together.",
+    "I'm the one with the touch. I'm the one who's magic.",
+    "You think I don't know what I got here?",
+    "When you do it right, it's not gambling.",
+    "I'm not a gambler, I'm a winner.",
+    "Trust the process.",
+    "Hold on, hold on, hold on — just listen to me.",
+]
+
+FAILED_QUOTES = [
+    "I gotta get the stone back.",
+    "This is not how this was supposed to go.",
+    "I'm in a lot of trouble here.",
+    "Everything is falling apart and nobody gives a s**t.",
+    "I need more time. Just a little more time.",
+    "It's over. It's all f**kin' over.",
+    "I'm f**ked, I'm totally f**ked.",
+    "You don't understand, this was a sure thing.",
+    "I had it, I had the whole thing, and it just...",
+    "Arno, please. Please, Arno.",
+    "I can fix this. I can fix all of this.",
+    "Give me another shot.",
+    "Don't do this to me. Don't f**kin' do this to me.",
+    "Where's my ring? Where's my f**kin' ring?",
+    "How did this happen? How did we get here?",
+]
 
 FRAGMENT_FILES = [
     "/tmp/trivy-fragment.md",
     "/tmp/size-fragment.md",
     "/tmp/deps-fragment.md",
 ]
+
+
+def get_sign_off(outcome, diff):
+    seed = int.from_bytes(hashlib.md5(diff.encode()).digest(), "big")
+    rng = random.Random(seed)
+    if outcome == "clean":
+        gif = rng.choice(CLEAN_GIFS)
+        return f"\n---\n\n![Uncut Gems]({gif})"
+    pool = FAILED_QUOTES if outcome == "failed" else FINDINGS_QUOTES
+    quote = rng.choice(pool)
+    return f'\n---\n\n> *"{quote}"* — Howard Ratner'
 
 
 def read_fragments():
@@ -80,7 +151,7 @@ def format_comment_body(finding):
     return body
 
 
-def build_failure_payload(reason, is_incremental, sha, fragments):
+def build_failure_payload(reason, is_incremental, sha, fragments, diff=""):
     body_parts = ["## Uncut Gemini", ""]
 
     if is_incremental:
@@ -96,6 +167,7 @@ def build_failure_payload(reason, is_incremental, sha, fragments):
     body_parts.append(f"Gemini review did not complete: {reason}")
     body_parts.append("")
     body_parts.append("See the workflow logs for details. Trivy and PR-stats results above are unaffected.")
+    body_parts.append(get_sign_off("failed", diff))
 
     return {
         "event": "COMMENT",
@@ -111,13 +183,13 @@ def write_payload(payload):
         f.write(payload["body"])
 
 
-def fail_with_payload(reason, is_incremental, sha, fragments):
+def fail_with_payload(reason, is_incremental, sha, fragments, diff=""):
     print(f"::warning::{reason}")
-    write_payload(build_failure_payload(reason, is_incremental, sha, fragments))
+    write_payload(build_failure_payload(reason, is_incremental, sha, fragments, diff))
     sys.exit(0)
 
 
-def build_review_payload(findings, summary, is_incremental, sha, fragments):
+def build_review_payload(findings, summary, is_incremental, sha, fragments, diff=""):
     body_parts = ["## Uncut Gemini", ""]
 
     if is_incremental:
@@ -132,6 +204,7 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
         body_parts.append("### 🔍 Code Review — clean")
         body_parts.append("")
         body_parts.append(summary)
+        body_parts.append(get_sign_off("clean", diff))
         return {
             "event": "COMMENT",
             "body": "\n".join(body_parts),
@@ -153,6 +226,7 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments):
     body_parts.append(summary)
     body_parts.append("")
     body_parts.append("See inline comments below for details.")
+    body_parts.append(get_sign_off("findings", diff))
 
     comments = []
     for f in sorted(findings, key=lambda x: SEVERITY_RANK.get(x.get("severity", "NIT"), 3)):
@@ -310,18 +384,18 @@ Severity guide:
             break
 
     if data is None:
-        fail_with_payload(last_error or "Gemini request failed", incremental, last_reviewed_sha, fragments)
+        fail_with_payload(last_error or "Gemini request failed", incremental, last_reviewed_sha, fragments, diff)
 
     if "error" in data:
         fail_with_payload(
             f"Gemini error: {data['error'].get('message', 'unknown')}",
-            incremental, last_reviewed_sha, fragments,
+            incremental, last_reviewed_sha, fragments, diff,
         )
 
     candidates = data.get("candidates", [])
     if not candidates:
         reason = data.get("promptFeedback", {}).get("blockReason", "no candidates")
-        fail_with_payload(f"Gemini blocked: {reason}", incremental, last_reviewed_sha, fragments)
+        fail_with_payload(f"Gemini blocked: {reason}", incremental, last_reviewed_sha, fragments, diff)
 
     try:
         parts = candidates[0]["content"]["parts"]
@@ -331,7 +405,7 @@ Severity guide:
         )
         text = text.strip()
     except (KeyError, IndexError, StopIteration, TypeError):
-        fail_with_payload("Gemini response had unexpected structure", incremental, last_reviewed_sha, fragments)
+        fail_with_payload("Gemini response had unexpected structure", incremental, last_reviewed_sha, fragments, diff)
 
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -343,7 +417,7 @@ Severity guide:
             reason = "Custom prompt did not produce valid JSON. Ensure your prompt requests the expected response schema."
         else:
             reason = f"Gemini returned non-JSON: {text[:200]}"
-        fail_with_payload(reason, incremental, last_reviewed_sha, fragments)
+        fail_with_payload(reason, incremental, last_reviewed_sha, fragments, diff)
 
     findings = [f for f in result.get("findings", [])
                 if SEVERITY_RANK.get(f.get("severity", "NIT"), 2) <= min_rank]
@@ -353,7 +427,7 @@ Severity guide:
     summary = result.get("summary", "No issues found.")
 
     review_payload = build_review_payload(
-        findings, summary, incremental, last_reviewed_sha, fragments
+        findings, summary, incremental, last_reviewed_sha, fragments, diff
     )
 
     write_payload(review_payload)

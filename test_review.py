@@ -5,6 +5,10 @@ from review import (
     format_comment_body,
     build_review_payload,
     build_failure_payload,
+    get_sign_off,
+    CLEAN_GIFS,
+    FINDINGS_QUOTES,
+    FAILED_QUOTES,
 )
 
 SAMPLE_DIFF = """diff --git a/src/app.py b/src/app.py
@@ -122,7 +126,7 @@ class TestFormatCommentBody(unittest.TestCase):
 
 class TestBuildReviewPayload(unittest.TestCase):
     def test_clean_review(self):
-        payload = build_review_payload([], "All good.", False, "", [])
+        payload = build_review_payload([], "All good.", False, "", [], "diff")
         self.assertEqual(payload["event"], "COMMENT")
         self.assertEqual(payload["comments"], [])
         self.assertIn("clean", payload["body"])
@@ -131,19 +135,19 @@ class TestBuildReviewPayload(unittest.TestCase):
         findings = [
             {"file": "a.py", "line": 10, "severity": "HIGH", "description": "bad", "suggested_fix": "fix"},
         ]
-        payload = build_review_payload(findings, "Issues found.", False, "", [])
+        payload = build_review_payload(findings, "Issues found.", False, "", [], "diff")
         self.assertEqual(payload["event"], "COMMENT")
         self.assertEqual(len(payload["comments"]), 1)
         self.assertEqual(payload["comments"][0]["path"], "a.py")
         self.assertEqual(payload["comments"][0]["line"], 10)
 
     def test_incremental_prefix(self):
-        payload = build_review_payload([], "ok", True, "abc1234567", [])
+        payload = build_review_payload([], "ok", True, "abc1234567", [], "diff")
         self.assertIn("abc1234", payload["body"])
 
     def test_fragments_included(self):
         fragments = ["### Dependencies — clean", "### Size — 100 lines"]
-        payload = build_review_payload([], "ok", False, "", fragments)
+        payload = build_review_payload([], "ok", False, "", fragments, "diff")
         self.assertIn("Dependencies", payload["body"])
         self.assertIn("Size", payload["body"])
 
@@ -151,15 +155,28 @@ class TestBuildReviewPayload(unittest.TestCase):
         findings = [
             {"file": "a.py", "line": 15, "start_line": 10, "severity": "MEDIUM", "description": "x"},
         ]
-        payload = build_review_payload(findings, "x", False, "", [])
+        payload = build_review_payload(findings, "x", False, "", [], "diff")
         comment = payload["comments"][0]
         self.assertEqual(comment["start_line"], 10)
         self.assertEqual(comment["start_side"], "RIGHT")
 
+    def test_clean_review_has_gif_sign_off(self):
+        payload = build_review_payload([], "All good.", False, "", [], "some diff")
+        self.assertIn("\n---\n", payload["body"])
+        self.assertIn("![Uncut Gems]", payload["body"])
+
+    def test_findings_review_has_quote_sign_off(self):
+        findings = [
+            {"file": "a.py", "line": 10, "severity": "HIGH", "description": "bad"},
+        ]
+        payload = build_review_payload(findings, "Issues.", False, "", [], "some diff")
+        self.assertIn("\n---\n", payload["body"])
+        self.assertIn("Howard Ratner", payload["body"])
+
 
 class TestBuildFailurePayload(unittest.TestCase):
     def test_failure_includes_reason(self):
-        payload = build_failure_payload("timed out after 120s", False, "", [])
+        payload = build_failure_payload("timed out after 120s", False, "", [], "diff")
         self.assertEqual(payload["event"], "COMMENT")
         self.assertEqual(payload["comments"], [])
         self.assertIn("Code Review — failed", payload["body"])
@@ -167,15 +184,58 @@ class TestBuildFailurePayload(unittest.TestCase):
 
     def test_failure_includes_fragments(self):
         fragments = ["### 🛡️ Dependencies — clean", "### 📏 Size — 50 lines"]
-        payload = build_failure_payload("api error", False, "", fragments)
+        payload = build_failure_payload("api error", False, "", fragments, "diff")
         self.assertIn("Dependencies", payload["body"])
         self.assertIn("Size", payload["body"])
         self.assertIn("api error", payload["body"])
 
     def test_failure_incremental_prefix(self):
-        payload = build_failure_payload("blocked", True, "abc1234567", [])
+        payload = build_failure_payload("blocked", True, "abc1234567", [], "diff")
         self.assertIn("abc1234", payload["body"])
         self.assertIn("Incremental review", payload["body"])
+
+    def test_failure_has_quote_sign_off(self):
+        payload = build_failure_payload("timed out", False, "", [], "some diff")
+        self.assertIn("\n---\n", payload["body"])
+        self.assertIn("Howard Ratner", payload["body"])
+
+
+class TestGetSignOff(unittest.TestCase):
+    def test_clean_returns_gif_markdown(self):
+        result = get_sign_off("clean", "some diff content")
+        self.assertIn("---", result)
+        self.assertIn("![", result)
+        self.assertTrue(any(gif in result for gif in CLEAN_GIFS))
+
+    def test_findings_returns_blockquote(self):
+        result = get_sign_off("findings", "some diff content")
+        self.assertIn("---", result)
+        self.assertIn("> *\"", result)
+        self.assertIn("Howard Ratner", result)
+        self.assertTrue(any(q in result for q in FINDINGS_QUOTES))
+
+    def test_failed_returns_blockquote(self):
+        result = get_sign_off("failed", "some diff content")
+        self.assertIn("---", result)
+        self.assertIn("> *\"", result)
+        self.assertIn("Howard Ratner", result)
+        self.assertTrue(any(q in result for q in FAILED_QUOTES))
+
+    def test_deterministic_for_same_diff(self):
+        result1 = get_sign_off("clean", "identical diff")
+        result2 = get_sign_off("clean", "identical diff")
+        self.assertEqual(result1, result2)
+
+    def test_different_diff_can_produce_different_result(self):
+        results = set()
+        for i in range(50):
+            results.add(get_sign_off("findings", f"diff variant {i}"))
+        self.assertGreater(len(results), 1)
+
+    def test_collections_have_sufficient_variety(self):
+        self.assertGreaterEqual(len(CLEAN_GIFS), 15)
+        self.assertGreaterEqual(len(FINDINGS_QUOTES), 15)
+        self.assertGreaterEqual(len(FAILED_QUOTES), 15)
 
 
 if __name__ == "__main__":
