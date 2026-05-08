@@ -1,4 +1,4 @@
-import hashlib, json, os, random, re, socket, sys, time, urllib.request, urllib.error
+import datetime, hashlib, json, os, random, re, socket, sys, time, urllib.request, urllib.error
 
 SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "NIT": 2}
 SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟡", "NIT": "🔵"}
@@ -305,7 +305,8 @@ def main():
         prompt = custom_prompt.replace("{diff}", diff).replace("{guidelines}", guidelines)
         prompt = prompt.replace("{schema}", SCHEMA_INSTRUCTIONS)
     else:
-        preamble = "You are a code reviewer. Review this pull request diff for security vulnerabilities, stability risks, and convention compliance."
+        today = datetime.date.today().isoformat()
+        preamble = f"You are a code reviewer. Today's date is {today}. Review this pull request diff for security vulnerabilities, stability risks, and convention compliance."
         if incremental:
             preamble += f"\n\nThis is an incremental review of commits since {last_reviewed_sha[:7]}. Focus exclusively on new and modified code."
 
@@ -313,7 +314,8 @@ def main():
 
 RULES:
 - Only review changed lines (+ prefixed in the diff) — do not flag pre-existing issues
-- Do not suggest GitHub Actions version changes — you lack real-time knowledge of releases and your suggestions may be incorrect or a downgrade
+- Do not suggest version upgrades, package migrations, or specific version numbers for ANY dependency (GitHub Actions, npm, pip, Docker images, etc.) — you lack real-time knowledge of releases and your suggestions may be incorrect, outdated, or nonexistent
+- Never claim a specific version fixes a vulnerability unless the fix version is explicitly stated in the diff itself
 - Return ONLY a JSON object — no markdown fences, no explanation
 - If no issues found, return: {{"verdict": "clean", "summary": "one sentence", "findings": []}}
 
