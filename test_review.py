@@ -171,7 +171,7 @@ class TestBuildReviewPayload(unittest.TestCase):
         ]
         payload = build_review_payload(findings, "Issues.", False, "", [], "some diff")
         self.assertIn("\n---\n", payload["body"])
-        self.assertIn("Howard Ratner", payload["body"])
+        self.assertIn("Adam Sandler", payload["body"])
 
 
 class TestBuildFailurePayload(unittest.TestCase):
@@ -197,7 +197,7 @@ class TestBuildFailurePayload(unittest.TestCase):
     def test_failure_has_quote_sign_off(self):
         payload = build_failure_payload("timed out", False, "", [], "some diff")
         self.assertIn("\n---\n", payload["body"])
-        self.assertIn("Howard Ratner", payload["body"])
+        self.assertIn("Adam Sandler", payload["body"])
 
 
 class TestGetSignOff(unittest.TestCase):
@@ -211,14 +211,14 @@ class TestGetSignOff(unittest.TestCase):
         result = get_sign_off("findings", "some diff content")
         self.assertIn("---", result)
         self.assertIn("> *\"", result)
-        self.assertIn("Howard Ratner", result)
+        self.assertIn("Adam Sandler", result)
         self.assertTrue(any(q in result for q in FINDINGS_QUOTES))
 
     def test_failed_returns_blockquote(self):
         result = get_sign_off("failed", "some diff content")
         self.assertIn("---", result)
         self.assertIn("> *\"", result)
-        self.assertIn("Howard Ratner", result)
+        self.assertIn("Adam Sandler", result)
         self.assertTrue(any(q in result for q in FAILED_QUOTES))
 
     def test_deterministic_for_same_diff(self):
@@ -233,9 +233,9 @@ class TestGetSignOff(unittest.TestCase):
         self.assertGreater(len(results), 1)
 
     def test_collections_have_sufficient_variety(self):
-        self.assertGreaterEqual(len(CLEAN_GIFS), 15)
-        self.assertGreaterEqual(len(FINDINGS_QUOTES), 15)
-        self.assertGreaterEqual(len(FAILED_QUOTES), 15)
+        self.assertGreaterEqual(len(CLEAN_GIFS), 50)
+        self.assertGreaterEqual(len(FINDINGS_QUOTES), 50)
+        self.assertGreaterEqual(len(FAILED_QUOTES), 30)
 
 
 if __name__ == "__main__":
