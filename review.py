@@ -485,6 +485,36 @@ def main():
         sys.exit(0)
 
     valid_ranges = parse_diff_ranges(diff)
+    if incremental:
+        try:
+            with open("/tmp/pr-full.diff") as f:
+                full = f.read()
+            full = full.strip()
+            if full and full.startswith("diff --git"):
+                pr_ranges = parse_diff_ranges(full)
+                for path in list(valid_ranges):
+                    if path not in pr_ranges:
+                        del valid_ranges[path]
+                        continue
+                    pr_set = set()
+                    for s, e in pr_ranges[path]:
+                        pr_set.update(range(s, e + 1))
+                    inc_set = set()
+                    for s, e in valid_ranges[path]:
+                        inc_set.update(range(s, e + 1))
+                    merged = sorted(inc_set & pr_set)
+                    if not merged:
+                        del valid_ranges[path]
+                        continue
+                    new_ranges = []
+                    for ln in merged:
+                        if new_ranges and ln == new_ranges[-1][1] + 1:
+                            new_ranges[-1] = (new_ranges[-1][0], ln)
+                        else:
+                            new_ranges.append((ln, ln))
+                    valid_ranges[path] = new_ranges
+        except FileNotFoundError:
+            print("::warning::Could not read full PR diff; falling back to incremental diff for validation")
     fragments = read_fragments()
 
     if custom_prompt:

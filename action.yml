@@ -248,6 +248,9 @@ runs:
           gh api "repos/$GITHUB_REPOSITORY/compare/${LAST_REVIEWED_SHA}...${CURRENT_SHA}" \
             --jq '.files[] | "diff --git a/\(.filename) b/\(.filename)\n\(.patch // "")"' \
             > /tmp/pr.diff 2>/dev/null || true
+          # Full PR diff for validating comment positions — GitHub's review
+          # API resolves lines against the PR diff, not the compare diff
+          gh pr diff "$PR_NUMBER" > /tmp/pr-full.diff 2>/dev/null || true
         fi
 
         if [ ! -s /tmp/pr.diff ]; then
