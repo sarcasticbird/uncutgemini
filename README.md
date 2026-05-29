@@ -83,7 +83,7 @@ Every PR gets a single unified review comment covering:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `google-api-key` | Yes | — | Google AI API key for Gemini |
-| `model` | No | `gemini-2.5-pro` | Gemini model to use |
+| `model` | No | `gemini-3.5-flash` | Gemini model to use |
 | `guidelines-file` | No | `.github/review-guidelines.md` | Path to repo-specific review guidelines |
 | `min-severity` | No | `MEDIUM` | Minimum review severity: `HIGH`, `MEDIUM`, or `NIT` |
 | `extra-instructions` | No | — | Additional instructions appended to the review prompt |
