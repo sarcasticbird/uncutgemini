@@ -469,7 +469,7 @@ Suggested fix rules:
 def main():
     api_key = os.environ["GOOGLE_API_KEY"]
     guidelines = os.environ.get("REVIEW_GUIDELINES", "")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
     min_severity = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
     custom_prompt = os.environ.get("CUSTOM_PROMPT", "").strip()
     extra_instructions = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
@@ -557,9 +557,17 @@ Severity guide:
 {diff}
 </diff>"""
 
+    # Gemini 3.x uses thinkingLevel and degrades if temperature is lowered below
+    # 1.0; Gemini 2.5 has no thinkingLevel and benefits from low temperature for
+    # deterministic JSON. Branch so an overridden 2.5 model still works.
+    if model.startswith("gemini-3"):
+        generation_config = {"thinkingConfig": {"thinkingLevel": "medium"}}
+    else:
+        generation_config = {"temperature": 0.1}
+
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1}
+        "generationConfig": generation_config
     })
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
