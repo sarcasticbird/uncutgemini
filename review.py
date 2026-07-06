@@ -1,7 +1,28 @@
-import datetime, hashlib, json, os, random, re, socket, sys, time, urllib.request, urllib.error
+import datetime, fnmatch, hashlib, json, os, random, re, socket, sys, time, urllib.request, urllib.error
 
 SEVERITY_RANK = {"HIGH": 0, "MEDIUM": 1, "NIT": 2}
 SEVERITY_ICON = {"HIGH": "🔴", "MEDIUM": "🟡", "NIT": "🔵"}
+
+DEFAULT_EXCLUDE_PATHS = [
+    "docs/*",
+    "*.md",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "go.sum",
+    "Cargo.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "Gemfile.lock",
+]
+
+# Above this many diff lines, Gemini 3.x models get thinkingLevel "high" —
+# flash-tier models miss real issues at "medium" on multi-thousand-line reviews.
+THINKING_HIGH_DIFF_LINES = 1500
+
+# Thinking models routinely exceed the 120s that sufficed for gemini-2.5;
+# high thinking on a large diff needs several minutes.
+GEMINI_TIMEOUT_SECONDS = 300
 
 CLEAN_GIFS = [
     # Uncut Gems
@@ -280,6 +301,25 @@ def read_fragments():
     return sections
 
 
+def filter_diff(diff_text, exclude_patterns):
+    if not exclude_patterns:
+        return diff_text
+    kept = []
+    keep = True
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git"):
+            match = re.search(r" b/(.+)$", line.rstrip("\n"))
+            path = match.group(1) if match else ""
+            base = path.rsplit("/", 1)[-1]
+            keep = not any(
+                fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(base, pat)
+                for pat in exclude_patterns
+            )
+        if keep:
+            kept.append(line)
+    return "".join(kept)
+
+
 def parse_diff_ranges(diff_text):
     ranges = {}
     current_file = None
@@ -436,20 +476,20 @@ def build_review_payload(findings, summary, is_incremental, sha, fragments, diff
 
 
 SCHEMA_INSTRUCTIONS = """Response schema:
-{{
+{
   "verdict": "clean | findings",
   "summary": "one sentence overall assessment",
   "findings": [
-    {{
+    {
       "severity": "HIGH | MEDIUM | NIT",
       "file": "relative/path",
       "line": 42,
       "start_line": 38,
       "description": "what and why",
       "suggested_fix": "the corrected replacement code or null"
-    }}
+    }
   ]
-}}
+}
 
 Line number rules:
 - "line" is REQUIRED — the line number in the NEW version of the file
@@ -466,10 +506,76 @@ Suggested fix rules:
 - Set to null if no concrete fix exists or if the fix spans multiple locations"""
 
 
+def build_prompt(diff, guidelines, extra_instructions="", incremental=False,
+                 last_reviewed_sha="", full_diff=""):
+    today = datetime.date.today().isoformat()
+    preamble = (
+        f"You are a code reviewer. Today's date is {today}. Review this pull request "
+        "diff for bugs, logic errors, race conditions, security vulnerabilities, "
+        "data-integrity and stability risks, and convention compliance."
+    )
+    if incremental:
+        preamble += (
+            f"\n\nThis is an incremental review of commits since {last_reviewed_sha[:7]}. "
+            "Focus exclusively on new and modified code."
+        )
+
+    prompt = f"""{preamble}
+
+RULES:
+- Only review changed lines (+ prefixed in the diff) — do not flag pre-existing issues
+- Examine every changed file and report every genuine issue, not just the first one you find
+- The diff shows only changed hunks, not whole files. Never claim an import, definition, or symbol is missing based only on its absence from the diff — it may exist in unchanged code
+- Do not suggest version upgrades, package migrations, or specific version numbers for ANY dependency (GitHub Actions, npm, pip, Docker images, etc.) — you lack real-time knowledge of releases and your suggestions may be incorrect, outdated, or nonexistent
+- Never claim a specific version fixes a vulnerability unless the fix version is explicitly stated in the diff itself
+- Return ONLY a JSON object — no markdown fences, no explanation
+- If no issues found, return: {{"verdict": "clean", "summary": "one sentence", "findings": []}}
+
+{SCHEMA_INSTRUCTIONS}
+
+Severity guide:
+- HIGH: Bug that produces wrong results or crashes, security vulnerability, data loss or corruption risk, breaking change
+- MEDIUM: Race condition, unhandled edge case, stability concern, missing safety check, convention violation
+- NIT: Minor improvement — only include if truly worth mentioning
+
+<conventions>
+{guidelines}
+</conventions>
+"""
+    if extra_instructions:
+        prompt += f"""
+<extra-instructions>
+{extra_instructions}
+</extra-instructions>
+"""
+    prompt += f"""
+<diff>
+{diff}
+</diff>"""
+    if incremental and full_diff:
+        prompt += f"""
+
+The <diff> above contains only the commits being reviewed. The full PR diff is provided below as read-only context for imports, definitions, and related changes. Report findings ONLY for lines in <diff>.
+<full-pr-diff>
+{full_diff}
+</full-pr-diff>"""
+    return prompt
+
+
+def build_generation_config(model, diff_line_count):
+    # Gemini 3.x uses thinkingLevel and degrades if temperature is lowered below
+    # 1.0; Gemini 2.5 has no thinkingLevel and benefits from low temperature for
+    # deterministic JSON. Branch so an overridden 2.5 model still works.
+    if model.startswith("gemini-3"):
+        level = "high" if diff_line_count > THINKING_HIGH_DIFF_LINES else "medium"
+        return {"thinkingConfig": {"thinkingLevel": level}}
+    return {"temperature": 0.1}
+
+
 def main():
     api_key = os.environ["GOOGLE_API_KEY"]
     guidelines = os.environ.get("REVIEW_GUIDELINES", "")
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
     min_severity = os.environ.get("MIN_SEVERITY", "MEDIUM").upper()
     custom_prompt = os.environ.get("CUSTOM_PROMPT", "").strip()
     extra_instructions = os.environ.get("EXTRA_INSTRUCTIONS", "").strip()
@@ -484,86 +590,73 @@ def main():
         print("Empty diff — nothing to review")
         sys.exit(0)
 
-    valid_ranges = parse_diff_ranges(diff)
+    fragments = read_fragments()
+
+    exclude_env = os.environ.get("EXCLUDE_PATHS", "").strip()
+    if exclude_env.lower() == "none":
+        exclude_paths = []
+    elif exclude_env:
+        exclude_paths = [p.strip() for p in exclude_env.split(",") if p.strip()]
+    else:
+        exclude_paths = DEFAULT_EXCLUDE_PATHS
+
+    raw_diff = diff
+    diff = filter_diff(diff, exclude_paths)
+    if not diff.strip():
+        print("No reviewable code changes after path exclusions")
+        write_payload(build_review_payload(
+            [], "Only excluded paths (docs, lockfiles) changed — no code to review.",
+            incremental, last_reviewed_sha, fragments, raw_diff,
+        ))
+        sys.exit(0)
+
+    full_diff = ""
     if incremental:
         try:
             with open("/tmp/pr-full.diff") as f:
-                full = f.read()
-            full = full.strip()
-            if full and full.startswith("diff --git"):
-                pr_ranges = parse_diff_ranges(full)
-                for path in list(valid_ranges):
-                    if path not in pr_ranges:
-                        del valid_ranges[path]
-                        continue
-                    pr_set = set()
-                    for s, e in pr_ranges[path]:
-                        pr_set.update(range(s, e + 1))
-                    inc_set = set()
-                    for s, e in valid_ranges[path]:
-                        inc_set.update(range(s, e + 1))
-                    merged = sorted(inc_set & pr_set)
-                    if not merged:
-                        del valid_ranges[path]
-                        continue
-                    new_ranges = []
-                    for ln in merged:
-                        if new_ranges and ln == new_ranges[-1][1] + 1:
-                            new_ranges[-1] = (new_ranges[-1][0], ln)
-                        else:
-                            new_ranges.append((ln, ln))
-                    valid_ranges[path] = new_ranges
+                full_diff = f.read().strip()
+            if not full_diff.startswith("diff --git"):
+                full_diff = ""
         except FileNotFoundError:
+            pass
+        if not full_diff:
             print("::warning::Could not read full PR diff; falling back to incremental diff for validation")
-    fragments = read_fragments()
+
+    valid_ranges = parse_diff_ranges(diff)
+    if incremental and full_diff:
+        pr_ranges = parse_diff_ranges(full_diff)
+        for path in list(valid_ranges):
+            if path not in pr_ranges:
+                del valid_ranges[path]
+                continue
+            pr_set = set()
+            for s, e in pr_ranges[path]:
+                pr_set.update(range(s, e + 1))
+            inc_set = set()
+            for s, e in valid_ranges[path]:
+                inc_set.update(range(s, e + 1))
+            merged = sorted(inc_set & pr_set)
+            if not merged:
+                del valid_ranges[path]
+                continue
+            new_ranges = []
+            for ln in merged:
+                if new_ranges and ln == new_ranges[-1][1] + 1:
+                    new_ranges[-1] = (new_ranges[-1][0], ln)
+                else:
+                    new_ranges.append((ln, ln))
+            valid_ranges[path] = new_ranges
 
     if custom_prompt:
         prompt = custom_prompt.replace("{diff}", diff).replace("{guidelines}", guidelines)
         prompt = prompt.replace("{schema}", SCHEMA_INSTRUCTIONS)
     else:
-        today = datetime.date.today().isoformat()
-        preamble = f"You are a code reviewer. Today's date is {today}. Review this pull request diff for security vulnerabilities, stability risks, and convention compliance."
-        if incremental:
-            preamble += f"\n\nThis is an incremental review of commits since {last_reviewed_sha[:7]}. Focus exclusively on new and modified code."
+        prompt = build_prompt(
+            diff, guidelines, extra_instructions, incremental,
+            last_reviewed_sha, filter_diff(full_diff, exclude_paths),
+        )
 
-        prompt = f"""{preamble}
-
-RULES:
-- Only review changed lines (+ prefixed in the diff) — do not flag pre-existing issues
-- Do not suggest version upgrades, package migrations, or specific version numbers for ANY dependency (GitHub Actions, npm, pip, Docker images, etc.) — you lack real-time knowledge of releases and your suggestions may be incorrect, outdated, or nonexistent
-- Never claim a specific version fixes a vulnerability unless the fix version is explicitly stated in the diff itself
-- Return ONLY a JSON object — no markdown fences, no explanation
-- If no issues found, return: {{"verdict": "clean", "summary": "one sentence", "findings": []}}
-
-{SCHEMA_INSTRUCTIONS}
-
-Severity guide:
-- HIGH: Security vulnerability, data loss risk, breaking change
-- MEDIUM: Stability concern, missing safety check, convention violation
-- NIT: Minor improvement — only include if truly worth mentioning
-
-<conventions>
-{guidelines}
-</conventions>
-"""
-        if extra_instructions:
-            prompt += f"""
-<extra-instructions>
-{extra_instructions}
-</extra-instructions>
-"""
-        prompt += f"""
-<diff>
-{diff}
-</diff>"""
-
-    # Gemini 3.x uses thinkingLevel and degrades if temperature is lowered below
-    # 1.0; Gemini 2.5 has no thinkingLevel and benefits from low temperature for
-    # deterministic JSON. Branch so an overridden 2.5 model still works.
-    if model.startswith("gemini-3"):
-        generation_config = {"thinkingConfig": {"thinkingLevel": "medium"}}
-    else:
-        generation_config = {"temperature": 0.1}
+    generation_config = build_generation_config(model, len(diff.splitlines()))
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -580,7 +673,7 @@ Severity guide:
             "x-goog-api-key": api_key,
         })
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT_SECONDS) as resp:
                 data = json.loads(resp.read())
             break
         except urllib.error.HTTPError as e:

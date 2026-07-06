@@ -5,10 +5,15 @@ from review import (
     format_comment_body,
     build_review_payload,
     build_failure_payload,
+    build_prompt,
+    build_generation_config,
+    filter_diff,
     get_sign_off,
     CLEAN_GIFS,
     FINDINGS_QUOTES,
     FAILED_QUOTES,
+    DEFAULT_EXCLUDE_PATHS,
+    THINKING_HIGH_DIFF_LINES,
 )
 
 SAMPLE_DIFF = """diff --git a/src/app.py b/src/app.py
@@ -236,6 +241,105 @@ class TestGetSignOff(unittest.TestCase):
         self.assertGreaterEqual(len(CLEAN_GIFS), 50)
         self.assertGreaterEqual(len(FINDINGS_QUOTES), 50)
         self.assertGreaterEqual(len(FAILED_QUOTES), 30)
+
+
+MULTI_FILE_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n"
+    "@@ -1,2 +1,3 @@\n x\n+y\n"
+    "diff --git a/docs/plan.md b/docs/plan.md\n"
+    "@@ -1,2 +1,3 @@\n a\n+b\n"
+    "diff --git a/README.md b/README.md\n"
+    "@@ -1 +1 @@\n-old\n+new\n"
+    "diff --git a/package-lock.json b/package-lock.json\n"
+    "@@ -1,2 +1,3 @@\n l\n+lockfile-noise\n"
+    "diff --git a/scripts/tool/go.sum b/scripts/tool/go.sum\n"
+    "@@ -1 +1 @@\n-a\n+b\n"
+)
+
+
+class TestFilterDiff(unittest.TestCase):
+    def test_excludes_docs_markdown_and_lockfiles(self):
+        filtered = filter_diff(MULTI_FILE_DIFF, DEFAULT_EXCLUDE_PATHS)
+        self.assertIn("src/app.py", filtered)
+        self.assertNotIn("docs/plan.md", filtered)
+        self.assertNotIn("README.md", filtered)
+        self.assertNotIn("package-lock.json", filtered)
+
+    def test_excludes_nested_lockfile_by_basename(self):
+        filtered = filter_diff(MULTI_FILE_DIFF, DEFAULT_EXCLUDE_PATHS)
+        self.assertNotIn("go.sum", filtered)
+
+    def test_keeps_hunks_of_retained_files_only(self):
+        filtered = filter_diff(MULTI_FILE_DIFF, DEFAULT_EXCLUDE_PATHS)
+        self.assertIn("+y", filtered)
+        self.assertNotIn("+lockfile-noise", filtered)
+
+    def test_no_patterns_keeps_diff_unchanged(self):
+        self.assertEqual(filter_diff(MULTI_FILE_DIFF, []), MULTI_FILE_DIFF)
+
+    def test_all_files_excluded_returns_empty(self):
+        docs_only = "diff --git a/docs/a.md b/docs/a.md\n@@ -1 +1 @@\n-x\n+y\n"
+        self.assertEqual(filter_diff(docs_only, DEFAULT_EXCLUDE_PATHS), "")
+
+
+class TestBuildPrompt(unittest.TestCase):
+    def test_asks_for_bugs_not_just_security(self):
+        prompt = build_prompt("some diff", "")
+        for term in ("bug", "logic error", "race condition", "security"):
+            self.assertIn(term, prompt.lower())
+
+    def test_includes_diff_schema_and_guidelines(self):
+        prompt = build_prompt("DIFF-CONTENT", "GUIDELINE-TEXT")
+        self.assertIn("DIFF-CONTENT", prompt)
+        self.assertIn('"verdict"', prompt)
+        self.assertIn("GUIDELINE-TEXT", prompt)
+
+    def test_schema_json_uses_single_braces(self):
+        prompt = build_prompt("d", "")
+        self.assertNotIn("{{", prompt)
+
+    def test_extra_instructions_appended(self):
+        prompt = build_prompt("d", "", extra_instructions="CHECK-THE-THING")
+        self.assertIn("CHECK-THE-THING", prompt)
+
+    def test_forbids_missing_symbol_claims_from_diff_alone(self):
+        prompt = build_prompt("d", "")
+        self.assertIn("import, definition, or symbol is missing", prompt.lower())
+
+    def test_incremental_includes_full_pr_diff_as_context(self):
+        prompt = build_prompt(
+            "INC-DIFF", "", incremental=True,
+            last_reviewed_sha="abc1234567", full_diff="FULL-PR-DIFF",
+        )
+        self.assertIn("INC-DIFF", prompt)
+        self.assertIn("<full-pr-diff>", prompt)
+        self.assertIn("FULL-PR-DIFF", prompt)
+        self.assertIn("abc1234", prompt)
+
+    def test_full_review_has_no_full_pr_diff_block(self):
+        prompt = build_prompt("d", "")
+        self.assertNotIn("<full-pr-diff>", prompt)
+
+    def test_incremental_without_full_diff_omits_context_block(self):
+        prompt = build_prompt(
+            "INC-DIFF", "", incremental=True,
+            last_reviewed_sha="abc1234567", full_diff="",
+        )
+        self.assertNotIn("<full-pr-diff>", prompt)
+
+
+class TestBuildGenerationConfig(unittest.TestCase):
+    def test_gemini3_small_diff_uses_medium_thinking(self):
+        config = build_generation_config("gemini-3.5-flash", 100)
+        self.assertEqual(config, {"thinkingConfig": {"thinkingLevel": "medium"}})
+
+    def test_gemini3_large_diff_uses_high_thinking(self):
+        config = build_generation_config("gemini-3.1-pro-preview", THINKING_HIGH_DIFF_LINES + 1)
+        self.assertEqual(config, {"thinkingConfig": {"thinkingLevel": "high"}})
+
+    def test_gemini25_uses_low_temperature(self):
+        config = build_generation_config("gemini-2.5-pro", 5000)
+        self.assertEqual(config, {"temperature": 0.1})
 
 
 if __name__ == "__main__":

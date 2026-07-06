@@ -83,10 +83,11 @@ Every PR gets a single unified review comment covering:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `google-api-key` | Yes | — | Google AI API key for Gemini |
-| `model` | No | `gemini-3.5-flash` | Gemini model to use |
+| `model` | No | `gemini-3.1-pro-preview` | Gemini model to use |
 | `guidelines-file` | No | `.github/review-guidelines.md` | Path to repo-specific review guidelines |
 | `min-severity` | No | `MEDIUM` | Minimum review severity: `HIGH`, `MEDIUM`, or `NIT` |
 | `extra-instructions` | No | — | Additional instructions appended to the review prompt |
+| `exclude-paths` | No | docs, markdown, lockfiles | Comma-separated path patterns excluded from review. Set to `none` to review everything |
 | `custom-prompt` | No | — | Full replacement prompt (`{diff}`, `{guidelines}`, `{schema}` placeholders) |
 | `trivy` | No | `true` | Run Trivy dependency scan |
 | `trivy-severity` | No | `CRITICAL,HIGH` | Trivy severity threshold |
