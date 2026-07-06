@@ -8,7 +8,7 @@ inputs:
   model:
     description: 'Gemini model to use'
     required: false
-    default: 'gemini-3.5-flash'
+    default: 'gemini-3.1-pro-preview'
   guidelines-file:
     description: 'Path to repo-specific review guidelines (markdown)'
     required: false
@@ -19,6 +19,10 @@ inputs:
     default: 'MEDIUM'
   extra-instructions:
     description: 'Additional instructions appended to the review prompt'
+    required: false
+    default: ''
+  exclude-paths:
+    description: 'Comma-separated path patterns excluded from review (docs, lockfiles). Set to "none" to review everything.'
     required: false
     default: ''
   custom-prompt:
@@ -273,6 +277,7 @@ runs:
         MIN_SEVERITY: ${{ inputs.min-severity }}
         GUIDELINES_FILE: ${{ inputs.guidelines-file }}
         EXTRA_INSTRUCTIONS: ${{ inputs.extra-instructions }}
+        EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
         CUSTOM_PROMPT: ${{ inputs.custom-prompt }}
       run: |
         if [ -f "$GUIDELINES_FILE" ]; then
